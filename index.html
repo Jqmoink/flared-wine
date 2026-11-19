@@ -1,0 +1,300 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>迷宫小游戏 · 障碍版</title>
+<style>
+  html,body{height:100%;}
+  body{
+    margin:0; background:#12151c; color:#e8eaf0;
+    font-family:"微软雅黑","Microsoft YaHei",sans-serif;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:10px; user-select:none;
+  }
+  #hud{font-size:15px; letter-spacing:1px; opacity:.85;}
+  #hud b{color:#4cc9f0; font-size:18px;}
+  canvas{border-radius:10px; box-shadow:0 10px 40px rgba(0,0,0,.65);}
+  #tip{font-size:12px; opacity:.45;}
+</style>
+</head>
+<body>
+
+<div id="hud">步数 <b id="steps">0</b> &nbsp;|&nbsp; 时间 <b id="time">0</b> 秒</div>
+<canvas id="game"></canvas>
+<div id="tip">方向键 / WASD 移动 &nbsp;·&nbsp; R 重开 &nbsp;·&nbsp; 当心尖刺与游荡的怪物</div>
+
+<script>
+/* ==========================================================
+   1. 地图
+   #  墙      .  地面     S  起点     E  终点     X  尖刺（碰了必死）
+   ========================================================== */
+const MAP = [
+  "###################",
+  "#S......#...#.....#",
+  "###.#.#.#.#.#.##.##",
+  "#.......#.#.#.....#",
+  "#.#######.#.#####.#",
+  "#.#.....#.#...#...#",
+  "#.###.#.#.#.#.#.#.#",
+  "#...X.#...#.#...#.#",
+  "#.#.#######.#####.#",
+  "#.........#.....#.#",
+  "#.#.#######.#.###.#",
+  "#...#.....#.#.#...#",
+  "#...#.###.#...#X###",
+  "#.......#...#....E#",
+  "###################",
+];
+
+/* ==========================================================
+   2. 移动障碍：每条走廊来回巡逻
+   数组里是巡逻经过的格子，怪物在两端折返
+   ========================================================== */
+const ENEMY_PATHS = [
+  [[1, 3], [1, 4], [1, 5], [1, 6], [1, 7], [1, 8], [1, 9], [1, 10], [1, 11], [1, 12], [1, 13]],
+  [[3, 7], [3, 8], [3, 9], [3, 10], [3, 11], [3, 12], [3, 13]],
+  [[1, 9], [2, 9], [3, 9], [4, 9], [5, 9], [6, 9], [7, 9], [8, 9], [9, 9]],
+];
+
+const COLS = MAP[0].length;
+const ROWS = MAP.length;
+const T = 40;
+const ENEMY_MS = 700;        // 怪物每走一格的时间（毫秒），越小越快
+
+/* ==========================================================
+   3. 贴图
+   ========================================================== */
+const SKIN = {
+  wall:   "wall.png",
+  floor:  "floor.png",
+  player: "player.png",
+  goal:   "goal.png",
+  trap:   "trap.png",
+  enemy:  "enemy.png",
+};
+
+const FALLBACK = {
+  wall:   "#293044",
+  floor:  "#171c26",
+  player: "#4cc9f0",
+  goal:   "#f9c74f",
+  trap:   "#e63946",
+  enemy:  "#c1121f",
+};
+
+const tex = {};
+let loadedCount = 0;
+const keys = Object.keys(SKIN);
+
+keys.forEach(function (k) {
+  const img = new Image();
+  img.onload = function () { tex[k] = img;  loadedCount++; maybeStart(); };
+  img.onerror = function () { tex[k] = null; loadedCount++; maybeStart(); };
+  img.src = SKIN[k];
+});
+
+function maybeStart() {
+  if (loadedCount === keys.length) start();
+}
+
+/* ==========================================================
+   4. 状态
+   ========================================================== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+canvas.width  = COLS * T;
+canvas.height = ROWS * T;
+
+let px = 0, py = 0;
+let steps = 0;
+let t0 = 0;
+let running = false;
+let won = false;
+let dead = false;
+let enemies = [];
+let enemyTimer = null;
+
+function start() {
+  clearInterval(enemyTimer);
+
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      if (MAP[y][x] === "S") { px = x; py = y; }
+    }
+  }
+
+  enemies = ENEMY_PATHS.map(function (path) {
+    return { path: path, i: 0, dir: 1, x: path[0][0], y: path[0][1] };
+  });
+
+  steps = 0;
+  t0 = performance.now();
+  running = true;
+  won = false;
+  dead = false;
+  document.getElementById("steps").textContent = "0";
+  document.getElementById("time").textContent = "0";
+
+  enemyTimer = setInterval(stepEnemies, ENEMY_MS);
+  draw();
+  requestAnimationFrame(tick);
+}
+
+function tick(now) {
+  if (!running) return;
+  document.getElementById("time").textContent = Math.floor((now - t0) / 1000);
+  requestAnimationFrame(tick);
+}
+
+/* ==========================================================
+   5. 怪物移动
+   ========================================================== */
+function stepEnemies() {
+  if (!running || won || dead) return;
+
+  for (let k = 0; k < enemies.length; k++) {
+    const e = enemies[k];
+    e.i += e.dir;
+
+    /* 走到头就折返 */
+    if (e.i >= e.path.length || e.i < 0) {
+      e.dir = -e.dir;
+      e.i += e.dir * 2;
+    }
+
+    e.x = e.path[e.i][0];
+    e.y = e.path[e.i][1];
+
+    /* 怪物踩到玩家 → 死 */
+    if (e.x === px && e.y === py) { die("被怪物抓住了"); return; }
+  }
+
+  draw();
+}
+
+/* ==========================================================
+   6. 绘制
+   ========================================================== */
+function drawImageCell(kind, x, y, shrink) {
+  const s = shrink || 0;
+  const img = tex[kind];
+  if (img) {
+    ctx.drawImage(img, x * T + s, y * T + s, T - s * 2, T - s * 2);
+  } else {
+    ctx.fillStyle = FALLBACK[kind];
+    ctx.fillRect(x * T + s, y * T + s, T - s * 2, T - s * 2);
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  /* 底图：墙 / 地面 / 尖刺 / 终点 */
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const c = MAP[y][x];
+
+      if (c === "#") {
+        drawImageCell("wall", x, y);
+      } else {
+        drawImageCell("floor", x, y);            /* 先铺地面 */
+        if (c === "X") drawImageCell("trap", x, y, 3);   /* 再叠尖刺 */
+        if (c === "E") drawImageCell("goal", x, y);
+      }
+    }
+  }
+
+  /* 怪物 */
+  for (let k = 0; k < enemies.length; k++) {
+    drawImageCell("enemy", enemies[k].x, enemies[k].y, 2);
+  }
+
+  /* 玩家 */
+  drawImageCell("player", px, py, 4);
+
+  /* 结算画面 */
+  if (won)  overlay("通关！", "用了 " + steps + " 步  ·  按 R 再来一局", "#4cc9f0");
+  if (dead) overlay("你死了", "按 R 重开一局", "#e63946");
+}
+
+function overlay(title, sub, color) {
+  ctx.fillStyle = "rgba(0,0,0,.74)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = color;
+  ctx.font = "bold 46px 微软雅黑";
+  ctx.textAlign = "center";
+  ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 10);
+
+  ctx.fillStyle = "#e8eaf0";
+  ctx.font = "20px 微软雅黑";
+  ctx.fillText(sub, canvas.width / 2, canvas.height / 2 + 40);
+}
+
+/* ==========================================================
+   7. 死亡 / 移动
+   ========================================================== */
+function die(reason) {
+  if (dead || won) return;
+  dead = true;
+  running = false;
+  clearInterval(enemyTimer);
+  draw();
+}
+
+function move(dx, dy) {
+  if (won || dead || !running) return;
+
+  const nx = px + dx;
+  const ny = py + dy;
+
+  if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) return;
+  if (MAP[ny][nx] === "#") return;
+
+  /* 踩到尖刺 */
+  if (MAP[ny][nx] === "X") {
+    px = nx; py = ny;
+    die("踩到尖刺");
+    return;
+  }
+
+  /* 撞到怪物 —— 玩家主动走过去也算死 */
+  for (let k = 0; k < enemies.length; k++) {
+    if (enemies[k].x === nx && enemies[k].y === ny) {
+      px = nx; py = ny;
+      die("撞上怪物");
+      return;
+    }
+  }
+
+  px = nx;
+  py = ny;
+  steps++;
+  document.getElementById("steps").textContent = steps;
+
+  if (MAP[ny][nx] === "E") {
+    won = true;
+    running = false;
+    clearInterval(enemyTimer);
+  }
+
+  draw();
+}
+
+/* ==========================================================
+   8. 键盘
+   ========================================================== */
+document.addEventListener("keydown", function (e) {
+  switch (e.key) {
+    case "ArrowUp": case "w": case "W": move(0, -1); break;
+    case "ArrowDown": case "s": case "S": move(0, 1); break;
+    case "ArrowLeft": case "a": case "A": move(-1, 0); break;
+    case "ArrowRight": case "d": case "D": move(1, 0); break;
+    case "r": case "R": start(); break;
+  }
+  if (e.key.indexOf("Arrow") === 0) e.preventDefault();
+});
+</script>
+</body>
+</html>
+
